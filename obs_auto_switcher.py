@@ -395,11 +395,16 @@ def script_load(settings):
     obs.timer_add(scene_switcher_tick, 1000)
     obs.timer_add(result_processor_tick, 100)
     obs.timer_add(connection_watchdog_tick, 5000)
-    obs.obs_frontend_add_event_callback(on_obs_frontend_event)
+
+    if len(get_current_obs_scenes()) == 0:
+        # Scenes are not loaded yet, so get a callback when they are.
+        # We want to avoid doing this if the scenes are already loaded,
+        # since this event callback will only be unregistered once scenes
+        # are loaded for the first time, and having the event callback
+        # registered causes a crash when scenes are switched.
+        obs.obs_frontend_add_event_callback(on_obs_frontend_event)
 
     log("Network Auto Switcher loaded")
-
-    script_update(settings)
 
 
 def script_update(settings):
@@ -434,7 +439,7 @@ def script_unload():
     obs.obs_frontend_remove_event_callback(on_obs_frontend_event)
     scene_managers.clear()
 
-    log("Network Auto Switcher unloaded")
+    print("Network Auto Switcher unloaded")
 
 
 def scene_switcher_tick():
