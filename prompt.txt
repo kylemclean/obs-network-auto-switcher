@@ -1,0 +1,17 @@
+Create a Python OBS script that allows for scenes to be automatically switched between based on the data received from a TCP socket.
+
+The script adds a filter to OBS called Network Auto Switcher. This filter can be added to any scene. The configuration GUI for this filter consists of a text field labelled "Server Address (optional)", which can optionally contain a server host:port. Below, there is a text field for "Default Score", which can be any floating point number, but it is -1 by default. Beneath that text field is a live updating text label showing the "Current Score" for that scene.
+
+If a server address is specified, the script will connect to the TCP server on that host and port, and continuously read newline-delimited JSON from that server. The JSON messages are in the form {"score": number}. Every time it receives a message from that server, it updates the score for that scene to whatever score it received. If the connection to the server is ever lost, the score is set to the minimum of the current score or the default score, and the script continuously attempts to reconnect to the server.
+
+In the settings GUI for the script, there is a "Scene Switch Interval (seconds)" which is set to 1 by default. Every time that interval elapses, the script will switch to the scene that has the highest score. If multiple scenes have the same highest score, and the current scene is one of them, then the scene is not switched. At the top of the settings GUI, there is an Enabled checkbox, which is checked by default and can be unchecked to disable the automatic switching.
+
+Any scene that does not have this filter will not be automatically switched to.
+
+If the scene is manually changed, then the Enabled checkbox is automatically unchecked.
+
+Ensure that anything interesting that happens is logged to the script log (initialization, configuration loading/changes/saving, server connection/disconnection, when the scene is switched, any errors).
+Ensure that the script continues to function properly when the filter settings or script settings are changed at any time.
+Ensure that the script won't throw exceptions against invalid data being entered into the filter settings or script settings.
+Ensure that the script will continue to work if a connection is lost to any server, and will keep trying to reconnect.
+Ensure that filter settings and script settings are persisted.

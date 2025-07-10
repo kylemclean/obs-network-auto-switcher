@@ -8,6 +8,7 @@ import select
 import os
 from dataclasses import dataclass
 
+script_settings = None
 enabled = False
 switch_interval = 1.0
 scene_managers = {}
@@ -48,6 +49,19 @@ class StatusResult:
 def log(message):
     if result_queue:
         result_queue.put(LogResult(message))
+
+
+def on_obs_frontend_event(event):
+    if event == obs.OBS_FRONTEND_EVENT_FINISHED_LOADING:
+        script_update(script_settings)
+
+        # Needed, because otherwise having an event callback when the scene is set
+        # in a timer causes OBS to crash.
+        # https://github.com/obsproject/obs-studio/issues/7516
+        # https://stackoverflow.com/questions/73142444/obs-crashes-when-set-current-scene-function-called-within-a-timer-callback-pyth
+        # https://obsproject.com/forum/threads/obs-crashes-when-switching-scene-during-a-timer_add-python-scripting.157999/
+
+        obs.obs_frontend_remove_event_callback(on_obs_frontend_event)
 
 
 def get_current_obs_scenes():
@@ -302,6 +316,21 @@ def connection_watchdog_tick():
             )
 
 
+def setup_scene_managers():
+    current_scene_names = get_current_obs_scenes()
+
+    for scene_name in current_scene_names:
+        if scene_name in scene_managers:
+            scene_managers[scene_name].update(script_settings)
+            continue
+        scene_managers[scene_name] = SceneManager(scene_name, script_settings)
+
+    for scene_name in list(scene_managers.keys()):
+        if scene_name not in current_scene_names:
+            command_queue.put(DisconnectCommand(scene_name))
+            del scene_managers[scene_name]
+
+
 def script_description():
     return "Switches scenes based on scores from a TCP server."
 
@@ -335,13 +364,6 @@ def script_properties():
             1000000,
             0.1,
         )
-        score_label = obs.obs_properties_add_text(
-            group, f"{scene_name}_current_score", "Current Score", obs.OBS_TEXT_INFO
-        )
-        manager = scene_managers.get(scene_name)
-        obs.obs_property_set_description(
-            score_label, str(manager.get_score()) if manager else "N/A"
-        )
         obs.obs_properties_add_group(
             props,
             f"group_{scene_name}",
@@ -365,16 +387,19 @@ def script_defaults(settings):
 
 
 def script_load(settings):
-    global network_thread, pipe_read_fd, pipe_write_fd
+    global network_thread, pipe_read_fd, pipe_write_fd, script_settings
     pipe_read_fd, pipe_write_fd = os.pipe()
     network_thread = threading.Thread(target=network_loop, args=(pipe_read_fd,))
     network_thread.start()
+    script_settings = settings
     obs.timer_add(scene_switcher_tick, 1000)
     obs.timer_add(result_processor_tick, 100)
     obs.timer_add(connection_watchdog_tick, 5000)
-    script_update(settings)
+    obs.obs_frontend_add_event_callback(on_obs_frontend_event)
 
-    log("Loaded Network Auto Switcher")
+    log("Network Auto Switcher loaded")
+
+    script_update(settings)
 
 
 def script_update(settings):
@@ -386,18 +411,8 @@ def script_update(settings):
         switch_interval = new_interval
         obs.timer_remove(scene_switcher_tick)
         obs.timer_add(scene_switcher_tick, int(switch_interval * 1000))
-    current_scene_names = get_current_obs_scenes()
 
-    for scene_name in current_scene_names:
-        if scene_name in scene_managers:
-            scene_managers[scene_name].update(settings)
-            continue
-        scene_managers[scene_name] = SceneManager(scene_name, settings)
-
-    for scene_name in list(scene_managers.keys()):
-        if scene_name not in current_scene_names:
-            command_queue.put(DisconnectCommand(scene_name))
-            del scene_managers[scene_name]
+    setup_scene_managers()
 
     log("Network Auto Switcher settings updated")
 
@@ -416,9 +431,10 @@ def script_unload():
     obs.timer_remove(scene_switcher_tick)
     obs.timer_remove(result_processor_tick)
     obs.timer_remove(connection_watchdog_tick)
+    obs.obs_frontend_remove_event_callback(on_obs_frontend_event)
     scene_managers.clear()
 
-    log("Unloaded Network Auto Switcher")
+    log("Network Auto Switcher unloaded")
 
 
 def scene_switcher_tick():
