@@ -92,24 +92,24 @@ def network_loop(pipe_read):
 
                 try:
                     data = sock.recv(1024)
-                    if data:
-                        buffers[sock] += data.decode("utf-8")
-                        while "\n" in buffers[sock]:
-                            line, buffers[sock] = buffers[sock].split("\n", 1)
-                            try:
-                                message = json.loads(line)
-                                if "score" in message:
-                                    result_queue.put(
-                                        {
-                                            "type": "score",
-                                            "scene_name": scene_name,
-                                            "score": float(message["score"]),
-                                        }
-                                    )
-                            except (json.JSONDecodeError, ValueError):
-                                log(f"[{scene_name}] Invalid JSON")
-                    else:
+                    if not data:
                         raise ConnectionResetError
+
+                    buffers[sock] += data.decode("utf-8")
+                    while "\n" in buffers[sock]:
+                        line, buffers[sock] = buffers[sock].split("\n", 1)
+                        try:
+                            message = json.loads(line)
+                            if "score" in message:
+                                result_queue.put(
+                                    {
+                                        "type": "score",
+                                        "scene_name": scene_name,
+                                        "score": float(message["score"]),
+                                    }
+                                )
+                        except (json.JSONDecodeError, ValueError):
+                            log(f"[{scene_name}] Invalid JSON")
                 except Exception:
                     log(f"[{scene_name}] Disconnected.")
                     result_queue.put(
@@ -117,10 +117,8 @@ def network_loop(pipe_read):
                     )
                     sock.close()
                     inputs.remove(sock)
-                    if sock in buffers:
-                        del buffers[sock]
-                    if scene_name in sockets:
-                        del sockets[scene_name]
+                    buffers.pop(sock, None)
+                    sockets.pop(scene_name, None)
 
             for sock in exceptional:
                 scene_name = next(
@@ -134,46 +132,47 @@ def network_loop(pipe_read):
                 )
                 sock.close()
                 inputs.remove(sock)
-                if sock in buffers:
-                    del buffers[sock]
-                if scene_name in sockets:
-                    del sockets[scene_name]
+                buffers.pop(sock, None)
+                sockets.pop(scene_name, None)
 
             while not command_queue.empty():
                 cmd = command_queue.get_nowait()
                 scene_name = cmd.get("scene_name")
+
                 if scene_name in sockets:
                     sockets[scene_name].close()
                     inputs.remove(sockets[scene_name])
                     del sockets[scene_name]
 
-                if cmd["command"] == "connect":
-                    try:
-                        host, port_str = cmd["address"].split(":")
-                        port = int(port_str)
-                        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        sock.setblocking(False)
-                        sock.connect_ex((host, port))
-                        sockets[scene_name] = sock
-                        buffers[sock] = ""
-                        inputs.append(sock)
-                        result_queue.put(
-                            {
-                                "type": "status",
-                                "scene_name": scene_name,
-                                "connected": True,
-                            }
-                        )
-                        log(f"[{scene_name}] Connection attempt initiated.")
-                    except Exception as e:
-                        log(f"[{scene_name}] Connection command failed: {e}")
-                        result_queue.put(
-                            {
-                                "type": "status",
-                                "scene_name": scene_name,
-                                "connected": False,
-                            }
-                        )
+                if cmd["command"] != "connect":
+                    continue
+
+                try:
+                    host, port_str = cmd["address"].split(":")
+                    port = int(port_str)
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.setblocking(False)
+                    sock.connect_ex((host, port))
+                    sockets[scene_name] = sock
+                    buffers[sock] = ""
+                    inputs.append(sock)
+                    result_queue.put(
+                        {
+                            "type": "status",
+                            "scene_name": scene_name,
+                            "connected": True,
+                        }
+                    )
+                    log(f"[{scene_name}] Connection attempt initiated.")
+                except Exception as e:
+                    log(f"[{scene_name}] Connection command failed: {e}")
+                    result_queue.put(
+                        {
+                            "type": "status",
+                            "scene_name": scene_name,
+                            "connected": False,
+                        }
+                    )
 
         except Exception as e:
             log(f"Network thread error: {e}")
@@ -197,8 +196,12 @@ def result_processor_tick():
 
             if res_type == "score":
                 scene_managers[scene_name].set_score(res["score"])
-            elif res_type == "status":
+                continue
+
+            if res_type == "status":
                 scene_managers[scene_name].is_connected = res["connected"]
+                continue
+
         except queue.Empty:
             break
 
@@ -208,18 +211,20 @@ def connection_watchdog_tick():
     for scene_name, manager in scene_managers.items():
         with manager.lock:
             if (
-                manager.is_managed
-                and not manager.is_connected
-                and manager.server_address
+                not manager.is_managed
+                or manager.is_connected
+                or not manager.server_address
             ):
-                log(f"Watchdog: Reconnecting {scene_name}")
-                command_queue.put(
-                    {
-                        "command": "connect",
-                        "scene_name": scene_name,
-                        "address": manager.server_address,
-                    }
-                )
+                continue
+
+            log(f"Watchdog: Reconnecting {scene_name}")
+            command_queue.put(
+                {
+                    "command": "connect",
+                    "scene_name": scene_name,
+                    "address": manager.server_address,
+                }
+            )
 
 
 def script_description():
@@ -233,42 +238,44 @@ def script_properties():
         props, "switch_interval", "Scene Switch Interval (seconds)", 0.1, 3600, 0.1
     )
     scenes = obs.obs_frontend_get_scenes()
-    if scenes:
-        for scene in scenes:
-            scene_name = obs.obs_source_get_name(scene)
-            group = obs.obs_properties_create()
-            obs.obs_properties_add_bool(
-                group, f"{scene_name}_managed", "Enable for this scene"
-            )
-            obs.obs_properties_add_text(
-                group,
-                f"{scene_name}_server_address",
-                "Server Address (host:port)",
-                obs.OBS_TEXT_DEFAULT,
-            )
-            obs.obs_properties_add_float(
-                group,
-                f"{scene_name}_default_score",
-                "Default Score",
-                -1000000,
-                1000000,
-                0.1,
-            )
-            score_label = obs.obs_properties_add_text(
-                group, f"{scene_name}_current_score", "Current Score", obs.OBS_TEXT_INFO
-            )
-            manager = scene_managers.get(scene_name)
-            obs.obs_property_set_description(
-                score_label, str(manager.get_score()) if manager else "N/A"
-            )
-            obs.obs_properties_add_group(
-                props,
-                f"group_{scene_name}",
-                f"Scene: {scene_name}",
-                obs.OBS_GROUP_NORMAL,
-                group,
-            )
-        obs.source_list_release(scenes)
+    if not scenes:
+        return props
+
+    for scene in scenes:
+        scene_name = obs.obs_source_get_name(scene)
+        group = obs.obs_properties_create()
+        obs.obs_properties_add_bool(
+            group, f"{scene_name}_managed", "Enable for this scene"
+        )
+        obs.obs_properties_add_text(
+            group,
+            f"{scene_name}_server_address",
+            "Server Address (host:port)",
+            obs.OBS_TEXT_DEFAULT,
+        )
+        obs.obs_properties_add_float(
+            group,
+            f"{scene_name}_default_score",
+            "Default Score",
+            -1000000,
+            1000000,
+            0.1,
+        )
+        score_label = obs.obs_properties_add_text(
+            group, f"{scene_name}_current_score", "Current Score", obs.OBS_TEXT_INFO
+        )
+        manager = scene_managers.get(scene_name)
+        obs.obs_property_set_description(
+            score_label, str(manager.get_score()) if manager else "N/A"
+        )
+        obs.obs_properties_add_group(
+            props,
+            f"group_{scene_name}",
+            f"Scene: {scene_name}",
+            obs.OBS_GROUP_NORMAL,
+            group,
+        )
+    obs.source_list_release(scenes)
     return props
 
 
@@ -276,14 +283,14 @@ def script_defaults(settings):
     obs.obs_data_set_default_bool(settings, "enabled", True)
     obs.obs_data_set_default_double(settings, "switch_interval", 1.0)
     scenes = obs.obs_frontend_get_scenes()
-    if scenes:
-        for scene in scenes:
-            scene_name = obs.obs_source_get_name(scene)
-            obs.obs_data_set_default_bool(settings, f"{scene_name}_managed", False)
-            obs.obs_data_set_default_double(
-                settings, f"{scene_name}_default_score", -1.0
-            )
-        obs.source_list_release(scenes)
+    if not scenes:
+        return
+
+    for scene in scenes:
+        scene_name = obs.obs_source_get_name(scene)
+        obs.obs_data_set_default_bool(settings, f"{scene_name}_managed", False)
+        obs.obs_data_set_default_double(settings, f"{scene_name}_default_score", -1.0)
+    obs.source_list_release(scenes)
 
 
 def script_load(settings):
@@ -312,11 +319,13 @@ def script_update(settings):
         for scene in scenes:
             current_scene_names.append(obs.obs_source_get_name(scene))
         obs.source_list_release(scenes)
+
     for scene_name in current_scene_names:
         if scene_name in scene_managers:
             scene_managers[scene_name].update(settings)
-        else:
-            scene_managers[scene_name] = SceneManager(scene_name, settings)
+            continue
+        scene_managers[scene_name] = SceneManager(scene_name, settings)
+
     for scene_name in list(scene_managers.keys()):
         if scene_name not in current_scene_names:
             command_queue.put({"command": "disconnect", "scene_name": scene_name})
@@ -354,19 +363,25 @@ def scene_switcher_tick():
             highest_score = score
             best_scene_name = scene_name
 
-    if best_scene_name:
-        # Get the current scene's name in a safe, isolated way
-        current_scene_source = obs.obs_frontend_get_current_scene()
-        current_scene_name = None
-        if current_scene_source:
-            current_scene_name = obs.obs_source_get_name(current_scene_source)
-            # Immediately release the handle after we're done with it
-            obs.obs_source_release(current_scene_source)
+    if not best_scene_name:
+        return
 
-        # If the best scene is not the current one, switch to it
-        if current_scene_name != best_scene_name:
-            best_scene_source = obs.obs_get_source_by_name(best_scene_name)
-            if best_scene_source:
-                obs.obs_frontend_set_current_scene(best_scene_source)
-                log(f"Switched to scene '{best_scene_name}' with score {highest_score}")
-                obs.obs_source_release(best_scene_source)
+    # Get the current scene's name in a safe, isolated way
+    current_scene_source = obs.obs_frontend_get_current_scene()
+    current_scene_name = None
+    if current_scene_source:
+        current_scene_name = obs.obs_source_get_name(current_scene_source)
+        # Immediately release the handle after we're done with it
+        obs.obs_source_release(current_scene_source)
+
+    # If the best scene is not the current one, switch to it
+    if current_scene_name == best_scene_name:
+        return
+
+    best_scene_source = obs.obs_get_source_by_name(best_scene_name)
+    if not best_scene_source:
+        return
+
+    obs.obs_frontend_set_current_scene(best_scene_source)
+    log(f"Switched to scene '{best_scene_name}' with score {highest_score}")
+    obs.obs_source_release(best_scene_source)
