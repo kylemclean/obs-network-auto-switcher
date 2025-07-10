@@ -7,16 +7,8 @@ import queue
 import select
 import os
 
-
-# --- Global State ---
-class ScriptSettings:
-    def __init__(self):
-        self.enabled = True
-        self.switch_interval = 1.0
-        self.is_switching = False
-
-
-script_settings = ScriptSettings()
+enabled = False
+switch_interval = 1.0
 scene_managers = {}
 command_queue = queue.Queue()
 result_queue = queue.Queue()
@@ -302,17 +294,18 @@ def script_load(settings):
     obs.timer_add(scene_switcher_tick, 1000)
     obs.timer_add(result_processor_tick, 100)
     obs.timer_add(connection_watchdog_tick, 5000)
-    # obs.obs_frontend_add_event_callback(on_event)
     script_update(settings)
 
 
 def script_update(settings):
-    script_settings.enabled = obs.obs_data_get_bool(settings, "enabled")
+    global enabled, switch_interval
+
+    enabled = obs.obs_data_get_bool(settings, "enabled")
     new_interval = obs.obs_data_get_double(settings, "switch_interval")
-    if new_interval != script_settings.switch_interval:
-        script_settings.switch_interval = new_interval
+    if new_interval != switch_interval:
+        switch_interval = new_interval
         obs.timer_remove(scene_switcher_tick)
-        obs.timer_add(scene_switcher_tick, int(script_settings.switch_interval * 1000))
+        obs.timer_add(scene_switcher_tick, int(switch_interval * 1000))
     current_scene_names = []
     scenes = obs.obs_frontend_get_scenes()
     if scenes:
@@ -344,21 +337,11 @@ def script_unload():
     obs.timer_remove(scene_switcher_tick)
     obs.timer_remove(result_processor_tick)
     obs.timer_remove(connection_watchdog_tick)
-    # obs.obs_frontend_remove_event_callback(on_event)
     scene_managers.clear()
 
 
-def on_event(event):
-    if event == obs.OBS_FRONTEND_EVENT_SCENE_CHANGED:
-        if not script_settings.is_switching and script_settings.enabled:
-            log("Scene manually changed. Disabling auto switcher.")
-            script_settings.enabled = False
-        if script_settings.is_switching:
-            script_settings.is_switching = False
-
-
 def scene_switcher_tick():
-    if not script_settings.enabled:
+    if not enabled:
         return
 
     highest_score = -float("inf")
@@ -384,7 +367,6 @@ def scene_switcher_tick():
         if current_scene_name != best_scene_name:
             best_scene_source = obs.obs_get_source_by_name(best_scene_name)
             if best_scene_source:
-                script_settings.is_switching = True
                 obs.obs_frontend_set_current_scene(best_scene_source)
                 log(f"Switched to scene '{best_scene_name}' with score {highest_score}")
                 obs.obs_source_release(best_scene_source)
